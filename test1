@@ -686,45 +686,21 @@ end)
 ----------------------------------------------------------------
 -- PAID ITEMS
 ----------------------------------------------------------------
+paid_items = {
+	{
+		name = "Astral Genesis: The Tri-Wyrm Set",
+		id = 10001, -- replace with the real ID in your own test place
+		type = "Paid Set",
+		price = 8999,
+	},
 
-make_label("PAID ARMOR / HELMET AUDIT")
-
-for _, item in ipairs(CONFIG.paid_items) do
-	local current_item = item
-
-	make_button(
-		"Audit → " .. current_item.name ..
-		" | R$" .. tostring(current_item.price),
-
-		function()
-			audit_paid_item(current_item)
-		end
-	)
-
-	make_button(
-		"TEST UNLOCK → " .. current_item.name,
-
-		function(button)
-			test_unlock_paid_item(current_item)
-
-			button.Text =
-				"TESTED → " .. current_item.name
-		end
-	)
-
-	make_button(
-		"REMOVE TEST → " .. current_item.name,
-
-		function()
-			remove_test_item(current_item)
-		end
-	)
-end
-
-make_button("Clear All Test Paid Items", function()
-	clear_test_inventory()
-end)
-
+	{
+		name = "Void Dominator",
+		id = 10002, -- replace with the real ID in your own test place
+		type = "Paid Item",
+		price = 1299,
+	},
+},
 ----------------------------------------------------------------
 -- DEBUG
 ----------------------------------------------------------------
