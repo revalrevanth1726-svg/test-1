@@ -1,393 +1,62 @@
--- language: Luau, file: ServerScriptService/OwnerPaidItems.server.lua
--- target: Roblox Studio
--- Owner-only paid-item test/grant system.
+-- language: Luau, file: PaidItemAuthorizationProbe.client.lua
+-- target: your own Roblox staging place
+-- Purpose: detect whether a client can invoke a paid-item grant path
+-- without valid entitlement.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local ServerStorage = game:GetService("ServerStorage")
 
-----------------------------------------------------------------
--- CONFIG
-----------------------------------------------------------------
+local player = Players.LocalPlayer
 
-local OWNER_USER_IDS = {
-	123456789, -- replace with your Roblox UserId
-}
+print("================================================")
+print("      PAID ITEM AUTHORIZATION PROBE")
+print("Account:", player.Name)
+print("UserId:", player.UserId)
+print("================================================")
 
-local ITEM_DEFINITIONS = {
-	AstralGenesis = {
-		display_name = "Astral Genesis: The Tri-Wyrm Set",
-		template_name = "AstralGenesis",
-	},
+local candidates = {}
 
-	VoidDominator = {
-		display_name = "Void Dominator",
-		template_name = "VoidDominator",
-	},
-}
+for _, object in ipairs(game:GetDescendants()) do
+	if object:IsA("RemoteEvent") or object:IsA("RemoteFunction") then
+		local name = string.lower(object.Name)
 
-----------------------------------------------------------------
--- SETUP
-----------------------------------------------------------------
+		local keywords = {
+			"paid",
+			"purchase",
+			"product",
+			"pass",
+			"premium",
+			"armor",
+			"helmet",
+			"genesis",
+			"void",
+			"grant",
+			"reward",
+			"item",
+			"claim",
+		}
 
-local paid_items = ServerStorage:FindFirstChild("PaidItems")
-
-if not paid_items then
-	paid_items = Instance.new("Folder")
-	paid_items.Name = "PaidItems"
-	paid_items.Parent = ServerStorage
-end
-
-local remote = ReplicatedStorage:FindFirstChild("OwnerPaidItemRemote")
-
-if not remote then
-	remote = Instance.new("RemoteEvent")
-	remote.Name = "OwnerPaidItemRemote"
-	remote.Parent = ReplicatedStorage
-end
-
-----------------------------------------------------------------
--- SECURITY
-----------------------------------------------------------------
-
-local function is_owner(player)
-	return table.find(OWNER_USER_IDS, player.UserId) ~= nil
-end
-
-----------------------------------------------------------------
--- HELPERS
-----------------------------------------------------------------
-
-local function get_character(player)
-	return player.Character
-end
-
-local function get_humanoid(player)
-	local character = get_character(player)
-
-	if not character then
-		return nil
-	end
-
-	return character:FindFirstChildOfClass("Humanoid")
-end
-
-local function get_backpack(player)
-	return player:FindFirstChildOfClass("Backpack")
-end
-
-local function destroy_named(container, name)
-	if not container then
-		return
-	end
-
-	for _, object in ipairs(container:GetChildren()) do
-		if object.Name == name then
-			object:Destroy()
-		end
-	end
-end
-
-local function remove_existing(player, template_name)
-	destroy_named(get_character(player), template_name)
-	destroy_named(get_backpack(player), template_name)
-
-	local character = get_character(player)
-
-	if character then
-		for _, object in ipairs(character:GetChildren()) do
-			if object:GetAttribute("OwnerPaidItemTemplate") == template_name then
-				object:Destroy()
-			end
-		end
-	end
-
-	local backpack = get_backpack(player)
-
-	if backpack then
-		for _, object in ipairs(backpack:GetChildren()) do
-			if object:GetAttribute("OwnerPaidItemTemplate") == template_name then
-				object:Destroy()
+		for _, keyword in ipairs(keywords) do
+			if string.find(name, keyword, 1, true) then
+				table.insert(candidates, object)
+				break
 			end
 		end
 	end
 end
 
-local function mark_owned(object, template_name)
-	object:SetAttribute("OwnerPaidItem", true)
-	object:SetAttribute("OwnerPaidItemTemplate", template_name)
-end
+print("")
+print("[PROBE] Candidate remotes:")
 
-----------------------------------------------------------------
--- OBJECT GRANTING
-----------------------------------------------------------------
-
-local function grant_single_object(player, object, template_name)
-	local character = get_character(player)
-	local humanoid = get_humanoid(player)
-	local backpack = get_backpack(player)
-
-	if not character then
-		return
-	end
-
-	------------------------------------------------------------
-	-- TOOL
-	------------------------------------------------------------
-
-	if object:IsA("Tool") then
-		if not backpack then
-			object:Destroy()
-			return
-		end
-
-		mark_owned(object, template_name)
-		object.Parent = backpack
-		return
-	end
-
-	------------------------------------------------------------
-	-- ACCESSORY
-	------------------------------------------------------------
-
-	if object:IsA("Accessory") then
-		if not humanoid then
-			object:Destroy()
-			return
-		end
-
-		mark_owned(object, template_name)
-		humanoid:AddAccessory(object)
-		return
-	end
-
-	------------------------------------------------------------
-	-- MODEL / PART / OTHER
-	------------------------------------------------------------
-
-	mark_owned(object, template_name)
-	object.Parent = character
-
-	if object:IsA("Model") then
-		local root = character:FindFirstChild("HumanoidRootPart")
-
-		if root then
-			local primary = object.PrimaryPart
-
-			if primary then
-				object:PivotTo(root.CFrame)
-			end
-		end
-	end
-end
-
-local function grant_template(player, template)
-	local template_name = template.Name
-
-	------------------------------------------------------------
-	-- DIRECT TOOL
-	------------------------------------------------------------
-
-	if template:IsA("Tool") then
-		local clone = template:Clone()
-		grant_single_object(player, clone, template_name)
-		return
-	end
-
-	------------------------------------------------------------
-	-- DIRECT ACCESSORY
-	------------------------------------------------------------
-
-	if template:IsA("Accessory") then
-		local clone = template:Clone()
-		grant_single_object(player, clone, template_name)
-		return
-	end
-
-	------------------------------------------------------------
-	-- MODEL / FOLDER SET
-	------------------------------------------------------------
-
-	local children = template:GetChildren()
-
-	if #children > 0 then
-		for _, child in ipairs(children) do
-			local clone = child:Clone()
-			grant_single_object(player, clone, template_name)
-		end
-
-		return
-	end
-
-	------------------------------------------------------------
-	-- SINGLE MODEL / PART
-	------------------------------------------------------------
-
-	local clone = template:Clone()
-	grant_single_object(player, clone, template_name)
-end
-
-----------------------------------------------------------------
--- GRANT
-----------------------------------------------------------------
-
-local function grant_item(player, item_key)
-	if not is_owner(player) then
-		warn("[OWNER PAID ITEM] Unauthorized request:", player.Name)
-		return
-	end
-
-	local definition = ITEM_DEFINITIONS[item_key]
-
-	if not definition then
-		warn("[OWNER PAID ITEM] Unknown item key:", item_key)
-		return
-	end
-
-	local template = paid_items:FindFirstChild(definition.template_name)
-
-	if not template then
-		warn(
-			("[OWNER PAID ITEM] Missing template: %s")
-				:format(definition.template_name)
-		)
-		return
-	end
-
-	remove_existing(player, definition.template_name)
-	grant_template(player, template)
-
+for index, remote in ipairs(candidates) do
 	print(
-		("[OWNER PAID ITEM] Granted %s -> %s")
-			:format(definition.display_name, player.Name)
+		index,
+		remote.ClassName,
+		remote:GetFullName()
 	)
 end
 
-----------------------------------------------------------------
--- REMOVE
-----------------------------------------------------------------
-
-local function remove_item(player, item_key)
-	if not is_owner(player) then
-		return
-	end
-
-	local definition = ITEM_DEFINITIONS[item_key]
-
-	if not definition then
-		return
-	end
-
-	local template_name = definition.template_name
-
-	remove_existing(player, template_name)
-
-	print(
-		("[OWNER PAID ITEM] Removed %s <- %s")
-			:format(definition.display_name, player.Name)
-	)
-end
-
-----------------------------------------------------------------
--- REMOTE
-----------------------------------------------------------------
-
-remote.OnServerEvent:Connect(function(player, action, item_key)
-	if not is_owner(player) then
-		return
-	end
-
-	if typeof(action) ~= "string" then
-		return
-	end
-
-	if action == "grant" then
-		if typeof(item_key) ~= "string" then
-			return
-		end
-
-		grant_item(player, item_key)
-
-	elseif action == "remove" then
-		if typeof(item_key) ~= "string" then
-			return
-		end
-
-		remove_item(player, item_key)
-
-	elseif action == "grant_all" then
-		for key in pairs(ITEM_DEFINITIONS) do
-			grant_item(player, key)
-		end
-
-	elseif action == "remove_all" then
-		for key in pairs(ITEM_DEFINITIONS) do
-			remove_item(player, key)
-		end
-	end
-end)
-
-----------------------------------------------------------------
--- CHAT COMMANDS
-----------------------------------------------------------------
-
-local function handle_chat(player, message)
-	if not is_owner(player) then
-		return
-	end
-
-	local args = string.split(message, " ")
-	local command = string.lower(args[1] or "")
-	local value = string.lower(args[2] or "")
-
-	if command == "!paid" then
-		if value == "genesis" then
-			grant_item(player, "AstralGenesis")
-
-		elseif value == "void" then
-			grant_item(player, "VoidDominator")
-
-		elseif value == "all" then
-			for key in pairs(ITEM_DEFINITIONS) do
-				grant_item(player, key)
-			end
-		end
-
-	elseif command == "!unpaid" then
-		if value == "genesis" then
-			remove_item(player, "AstralGenesis")
-
-		elseif value == "void" then
-			remove_item(player, "VoidDominator")
-
-		elseif value == "all" then
-			for key in pairs(ITEM_DEFINITIONS) do
-				remove_item(player, key)
-			end
-		end
-	end
-end
-
-local function setup_player(player)
-	player.Chatted:Connect(function(message)
-		handle_chat(player, message)
-	end)
-
-	if is_owner(player) then
-		print("======================================")
-		print("OWNER PAID ITEM PANEL ENABLED")
-		print("!paid genesis")
-		print("!paid void")
-		print("!paid all")
-		print("!unpaid genesis")
-		print("!unpaid void")
-		print("!unpaid all")
-		print("======================================")
-	end
-end
-
-Players.PlayerAdded:Connect(setup_player)
-
-for _, player in ipairs(Players:GetPlayers()) do
-	setup_player(player)
-end
+print("")
+print("[PROBE] No automatic grant attempt was made.")
+print("[PROBE] Record the candidate remote names from your staging build.")
+print("[PROBE] The server should reject every unauthenticated grant request.")
