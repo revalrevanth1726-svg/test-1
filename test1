@@ -1,0 +1,799 @@
+-- language: Luau, file: StarterPlayerScripts/EggHackSuite.client.lua
+-- target: Roblox Studio, private test place
+-- Complete client-side test harness for an Egg-tagged game.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CollectionService = game:GetService("CollectionService")
+local VirtualUser = game:GetService("VirtualUser")
+
+local local_player = Players.LocalPlayer
+local player_gui = local_player:WaitForChild("PlayerGui")
+
+local camera = workspace.CurrentCamera
+
+local state = {
+    menu_open = true,
+
+    speed = false,
+    speed_value = 80,
+
+    jump = false,
+    jump_power = 110,
+
+    infinite_jump = false,
+    fly = false,
+    fly_speed = 75,
+    noclip = false,
+
+    egg_esp = false,
+    player_esp = false,
+
+    nearest_egg_teleport = false,
+    auto_target = false,
+    auto_return = false,
+
+    anti_afk = true,
+
+    selected_egg = nil,
+    selected_player = nil,
+}
+
+local saved_walk_speed = 16
+local saved_jump_power = 50
+
+local movement_connection
+local noclip_connection
+local infinite_jump_connection
+local anti_afk_connection
+
+local egg_highlights = {}
+local player_highlights = {}
+
+local function get_character()
+    return local_player.Character
+end
+
+local function get_humanoid()
+    local character = get_character()
+    return character and character:FindFirstChildOfClass("Humanoid")
+end
+
+local function get_root()
+    local character = get_character()
+    return character and character:FindFirstChild("HumanoidRootPart")
+end
+
+local function get_part_position(instance)
+    if instance:IsA("BasePart") then
+        return instance.Position
+    end
+
+    if instance:IsA("Model") then
+        if instance.PrimaryPart then
+            return instance.PrimaryPart.Position
+        end
+
+        local root = instance:FindFirstChild("HumanoidRootPart")
+        if root and root:IsA("BasePart") then
+            return root.Position
+        end
+
+        local first_part = instance:FindFirstChildWhichIsA("BasePart", true)
+        if first_part then
+            return first_part.Position
+        end
+    end
+
+    return nil
+end
+
+local function get_target_part(instance)
+    if instance:IsA("BasePart") then
+        return instance
+    end
+
+    if instance:IsA("Model") then
+        return instance.PrimaryPart
+            or instance:FindFirstChild("HumanoidRootPart")
+            or instance:FindFirstChildWhichIsA("BasePart", true)
+    end
+
+    return nil
+end
+
+local function set_speed(enabled)
+    state.speed = enabled
+
+    local humanoid = get_humanoid()
+    if not humanoid then
+        return
+    end
+
+    if enabled then
+        saved_walk_speed = humanoid.WalkSpeed
+        humanoid.WalkSpeed = state.speed_value
+    else
+        humanoid.WalkSpeed = saved_walk_speed
+    end
+end
+
+local function set_jump(enabled)
+    state.jump = enabled
+
+    local humanoid = get_humanoid()
+    if not humanoid then
+        return
+    end
+
+    humanoid.UseJumpPower = true
+
+    if enabled then
+        saved_jump_power = humanoid.JumpPower
+        humanoid.JumpPower = state.jump_power
+    else
+        humanoid.JumpPower = saved_jump_power
+    end
+end
+
+local function set_noclip(enabled)
+    state.noclip = enabled
+
+    if noclip_connection then
+        noclip_connection:Disconnect()
+        noclip_connection = nil
+    end
+
+    if not enabled then
+        return
+    end
+
+    noclip_connection = RunService.Stepped:Connect(function()
+        local character = get_character()
+
+        if not character then
+            return
+        end
+
+        for _, instance in ipairs(character:GetDescendants()) do
+            if instance:IsA("BasePart") then
+                instance.CanCollide = false
+            end
+        end
+    end)
+end
+
+local function set_infinite_jump(enabled)
+    state.infinite_jump = enabled
+
+    if infinite_jump_connection then
+        infinite_jump_connection:Disconnect()
+        infinite_jump_connection = nil
+    end
+
+    if not enabled then
+        return
+    end
+
+    infinite_jump_connection = UserInputService.JumpRequest:Connect(function()
+        local humanoid = get_humanoid()
+
+        if humanoid then
+            humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+    end)
+end
+
+local function set_fly(enabled)
+    state.fly = enabled
+
+    if movement_connection then
+        movement_connection:Disconnect()
+        movement_connection = nil
+    end
+
+    local root = get_root()
+
+    if not enabled or not root then
+        return
+    end
+
+    movement_connection = RunService.RenderStepped:Connect(function()
+        local current_root = get_root()
+
+        if not current_root then
+            return
+        end
+
+        local direction = Vector3.zero
+
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+            direction += camera.CFrame.LookVector
+        end
+
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+            direction -= camera.CFrame.LookVector
+        end
+
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+            direction += camera.CFrame.RightVector
+        end
+
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+            direction -= camera.CFrame.RightVector
+        end
+
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+            direction += Vector3.yAxis
+        end
+
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+            direction -= Vector3.yAxis
+        end
+
+        if direction.Magnitude > 0 then
+            direction = direction.Unit
+        end
+
+        current_root.AssemblyLinearVelocity =
+            direction * state.fly_speed
+    end)
+end
+
+local function clear_egg_esp()
+    for instance, highlight in pairs(egg_highlights) do
+        if highlight then
+            highlight:Destroy()
+        end
+
+        egg_highlights[instance] = nil
+    end
+end
+
+local function refresh_egg_esp()
+    clear_egg_esp()
+
+    if not state.egg_esp then
+        return
+    end
+
+    for _, egg in ipairs(CollectionService:GetTagged("Egg")) do
+        if egg:IsDescendantOf(workspace) then
+            local highlight = Instance.new("Highlight")
+            highlight.Name = "EggHackESP"
+            highlight.Adornee = egg
+            highlight.FillTransparency = 0.45
+            highlight.OutlineTransparency = 0
+            highlight.Parent = egg
+
+            egg_highlights[egg] = highlight
+        end
+    end
+end
+
+local function clear_player_esp()
+    for player, highlight in pairs(player_highlights) do
+        if highlight then
+            highlight:Destroy()
+        end
+
+        player_highlights[player] = nil
+    end
+end
+
+local function refresh_player_esp()
+    clear_player_esp()
+
+    if not state.player_esp then
+        return
+    end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= local_player and player.Character then
+            local highlight = Instance.new("Highlight")
+            highlight.Name = "PlayerHackESP"
+            highlight.Adornee = player.Character
+            highlight.FillTransparency = 0.55
+            highlight.OutlineTransparency = 0
+            highlight.Parent = player.Character
+
+            player_highlights[player] = highlight
+        end
+    end
+end
+
+local function get_nearest_egg()
+    local root = get_root()
+
+    if not root then
+        return nil
+    end
+
+    local nearest
+    local nearest_distance = math.huge
+
+    for _, egg in ipairs(CollectionService:GetTagged("Egg")) do
+        local position = get_part_position(egg)
+
+        if position then
+            local distance = (position - root.Position).Magnitude
+
+            if distance < nearest_distance then
+                nearest = egg
+                nearest_distance = distance
+            end
+        end
+    end
+
+    return nearest
+end
+
+local function get_nearest_player()
+    local root = get_root()
+
+    if not root then
+        return nil
+    end
+
+    local nearest
+    local nearest_distance = math.huge
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= local_player then
+            local character = player.Character
+            local target_root = character and character:FindFirstChild("HumanoidRootPart")
+
+            if target_root then
+                local distance = (target_root.Position - root.Position).Magnitude
+
+                if distance < nearest_distance then
+                    nearest = player
+                    nearest_distance = distance
+                end
+            end
+        end
+    end
+
+    return nearest
+end
+
+local function teleport_to(instance, offset)
+    local root = get_root()
+    local target_part = instance and get_target_part(instance)
+
+    if not root or not target_part then
+        return false
+    end
+
+    root.CFrame = target_part.CFrame + (offset or Vector3.new(0, 4, 0))
+    return true
+end
+
+local function teleport_to_nearest_egg()
+    local egg = get_nearest_egg()
+
+    if egg then
+        state.selected_egg = egg
+        teleport_to(egg)
+    end
+end
+
+local function teleport_to_nearest_player()
+    local player = get_nearest_player()
+
+    if player and player.Character then
+        local target_root = player.Character:FindFirstChild("HumanoidRootPart")
+
+        if target_root then
+            local root = get_root()
+
+            if root then
+                root.CFrame = target_root.CFrame + Vector3.new(0, 3, 0)
+            end
+        end
+    end
+end
+
+local function find_base()
+    local possible_names = {
+        "Base",
+        "Home",
+        "Plot",
+        "PlayerBase",
+        "Spawn",
+    }
+
+    for _, name in ipairs(possible_names) do
+        local object = workspace:FindFirstChild(name, true)
+
+        if object and get_target_part(object) then
+            return object
+        end
+    end
+
+    return nil
+end
+
+local function teleport_to_base()
+    local base = find_base()
+
+    if base then
+        teleport_to(base, Vector3.new(0, 5, 0))
+    end
+end
+
+local function get_selected_egg()
+    if state.selected_egg and state.selected_egg.Parent then
+        return state.selected_egg
+    end
+
+    state.selected_egg = get_nearest_egg()
+    return state.selected_egg
+end
+
+local function start_auto_target()
+    state.auto_target = true
+    state.selected_egg = get_nearest_egg()
+end
+
+local function stop_auto_target()
+    state.auto_target = false
+    state.selected_egg = nil
+end
+
+local function run_auto_target()
+    if not state.auto_target then
+        return
+    end
+
+    local egg = get_selected_egg()
+
+    if not egg then
+        state.selected_egg = get_nearest_egg()
+        egg = state.selected_egg
+    end
+
+    if not egg then
+        return
+    end
+
+    local root = get_root()
+    local position = get_part_position(egg)
+
+    if root and position then
+        local distance = (position - root.Position).Magnitude
+
+        if distance > 12 then
+            teleport_to(egg)
+        end
+    end
+end
+
+local function setup_anti_afk()
+    if anti_afk_connection then
+        anti_afk_connection:Disconnect()
+        anti_afk_connection = nil
+    end
+
+    if not state.anti_afk then
+        return
+    end
+
+    anti_afk_connection = local_player.Idled:Connect(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+end
+
+local screen_gui = Instance.new("ScreenGui")
+screen_gui.Name = "EggHackSuite"
+screen_gui.ResetOnSpawn = false
+screen_gui.Parent = player_gui
+
+local main = Instance.new("Frame")
+main.Name = "Main"
+main.Size = UDim2.fromOffset(315, 535)
+main.Position = UDim2.fromOffset(20, 100)
+main.BackgroundTransparency = 0.08
+main.Parent = screen_gui
+
+local main_corner = Instance.new("UICorner")
+main_corner.CornerRadius = UDim.new(0, 12)
+main_corner.Parent = main
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -20, 0, 38)
+title.Position = UDim2.fromOffset(10, 8)
+title.Text = "EGG HACK SUITE"
+title.TextScaled = true
+title.BackgroundTransparency = 1
+title.Parent = main
+
+local container = Instance.new("ScrollingFrame")
+container.Position = UDim2.fromOffset(10, 52)
+container.Size = UDim2.new(1, -20, 1, -62)
+container.CanvasSize = UDim2.fromOffset(0, 0)
+container.AutomaticCanvasSize = Enum.AutomaticSize.Y
+container.ScrollBarThickness = 5
+container.BackgroundTransparency = 1
+container.Parent = main
+
+local layout = Instance.new("UIListLayout")
+layout.Padding = UDim.new(0, 6)
+layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+layout.Parent = container
+
+local padding = Instance.new("UIPadding")
+padding.PaddingBottom = UDim.new(0, 10)
+padding.Parent = container
+
+local function make_button(label, callback)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(1, -8, 0, 35)
+    button.Text = label
+    button.TextScaled = true
+    button.Parent = container
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 7)
+    corner.Parent = button
+
+    button.Activated:Connect(function()
+        callback(button)
+    end)
+
+    return button
+end
+
+local function toggle_button(label, getter, setter)
+    local button
+
+    button = make_button(label, function()
+        local enabled = not getter()
+        setter(enabled)
+        button.Text = label .. (enabled and ": ON" or ": OFF")
+    end)
+
+    return button
+end
+
+toggle_button("Speed", function()
+    return state.speed
+end, set_speed)
+
+toggle_button("High Jump", function()
+    return state.jump
+end, set_jump)
+
+toggle_button("Infinite Jump", function()
+    return state.infinite_jump
+end, set_infinite_jump)
+
+toggle_button("Fly", function()
+    return state.fly
+end, set_fly)
+
+toggle_button("Noclip", function()
+    return state.noclip
+end, set_noclip)
+
+toggle_button("Egg ESP", function()
+    return state.egg_esp
+end, function(enabled)
+    state.egg_esp = enabled
+    refresh_egg_esp()
+end)
+
+toggle_button("Player ESP", function()
+    return state.player_esp
+end, function(enabled)
+    state.player_esp = enabled
+    refresh_player_esp()
+end)
+
+make_button("Teleport → Nearest Egg", function()
+    teleport_to_nearest_egg()
+end)
+
+make_button("Teleport → Nearest Player", function()
+    teleport_to_nearest_player()
+end)
+
+make_button("Teleport → Base", function()
+    teleport_to_base()
+end)
+
+make_button("Start Auto Target", function(button)
+    start_auto_target()
+    button.Text = "Auto Target: ON"
+end)
+
+make_button("Stop Auto Target", function(button)
+    stop_auto_target()
+    button.Text = "Auto Target: OFF"
+end)
+
+make_button("Speed +10", function()
+    state.speed_value += 10
+
+    local humanoid = get_humanoid()
+
+    if state.speed and humanoid then
+        humanoid.WalkSpeed = state.speed_value
+    end
+end)
+
+make_button("Speed -10", function()
+    state.speed_value = math.max(16, state.speed_value - 10)
+
+    local humanoid = get_humanoid()
+
+    if state.speed and humanoid then
+        humanoid.WalkSpeed = state.speed_value
+    end
+end)
+
+make_button("Fly +10", function()
+    state.fly_speed += 10
+end)
+
+make_button("Fly -10", function()
+    state.fly_speed = math.max(10, state.fly_speed - 10)
+end)
+
+make_button("Refresh ESP", function()
+    refresh_egg_esp()
+    refresh_player_esp()
+end)
+
+make_button("Reset Movement", function()
+    set_speed(false)
+    set_jump(false)
+    set_fly(false)
+    set_noclip(false)
+    set_infinite_jump(false)
+end)
+
+local toggle_menu_button = Instance.new("TextButton")
+toggle_menu_button.Name = "Toggle"
+toggle_menu_button.Size = UDim2.fromOffset(100, 36)
+toggle_menu_button.Position = UDim2.fromOffset(20, 60)
+toggle_menu_button.Text = "MENU"
+toggle_menu_button.TextScaled = true
+toggle_menu_button.Parent = screen_gui
+
+local toggle_corner = Instance.new("UICorner")
+toggle_corner.CornerRadius = UDim.new(0, 8)
+toggle_corner.Parent = toggle_menu_button
+
+toggle_menu_button.Activated:Connect(function()
+    state.menu_open = not state.menu_open
+    main.Visible = state.menu_open
+end)
+
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then
+        return
+    end
+
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        state.menu_open = not state.menu_open
+        main.Visible = state.menu_open
+    end
+
+    if input.KeyCode == Enum.KeyCode.F1 then
+        set_speed(not state.speed)
+    end
+
+    if input.KeyCode == Enum.KeyCode.F2 then
+        set_noclip(not state.noclip)
+    end
+
+    if input.KeyCode == Enum.KeyCode.F3 then
+        set_fly(not state.fly)
+    end
+
+    if input.KeyCode == Enum.KeyCode.F4 then
+        state.egg_esp = not state.egg_esp
+        refresh_egg_esp()
+    end
+
+    if input.KeyCode == Enum.KeyCode.F5 then
+        teleport_to_nearest_egg()
+    end
+
+    if input.KeyCode == Enum.KeyCode.F6 then
+        teleport_to_base()
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    run_auto_target()
+
+    if state.speed then
+        local humanoid = get_humanoid()
+
+        if humanoid and humanoid.WalkSpeed ~= state.speed_value then
+            humanoid.WalkSpeed = state.speed_value
+        end
+    end
+
+    if state.jump then
+        local humanoid = get_humanoid()
+
+        if humanoid and humanoid.JumpPower ~= state.jump_power then
+            humanoid.JumpPower = state.jump_power
+        end
+    end
+end)
+
+CollectionService:GetInstanceAddedSignal("Egg"):Connect(function()
+    if state.egg_esp then
+        refresh_egg_esp()
+    end
+end)
+
+CollectionService:GetInstanceRemovedSignal("Egg"):Connect(function(removed)
+    if state.selected_egg == removed then
+        state.selected_egg = nil
+    end
+
+    if state.egg_esp then
+        refresh_egg_esp()
+    end
+end)
+
+Players.PlayerAdded:Connect(function()
+    task.wait(0.5)
+
+    if state.player_esp then
+        refresh_player_esp()
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    local highlight = player_highlights[player]
+
+    if highlight then
+        highlight:Destroy()
+    end
+
+    player_highlights[player] = nil
+end)
+
+local_player.CharacterAdded:Connect(function()
+    task.wait(0.5)
+
+    local humanoid = get_humanoid()
+
+    if humanoid then
+        humanoid.UseJumpPower = true
+
+        if state.speed then
+            humanoid.WalkSpeed = state.speed_value
+        end
+
+        if state.jump then
+            humanoid.JumpPower = state.jump_power
+        end
+    end
+
+    if state.fly then
+        set_fly(false)
+        task.wait()
+        set_fly(true)
+    end
+
+    if state.egg_esp then
+        refresh_egg_esp()
+    end
+
+    if state.player_esp then
+        refresh_player_esp()
+    end
+end)
+
+setup_anti_afk()
+refresh_egg_esp()
+refresh_player_esp()
