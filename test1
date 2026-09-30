@@ -1,188 +1,848 @@
--- language: Luau, file: ServerScriptService/DebugController.server.lua
+-- language: Luau, file: StarterPlayerScripts/LootForgeTestHarness.client.lua
 -- target: Roblox Studio
--- Own-place debug authority for movement, teleport, and egg testing.
+-- Single-script GUI test harness.
+-- Features:
+--   Paid armor/helmet entitlement simulation
+--   Purchase-flow audit
+--   Ore spawning
+--   Ore ESP
+--   Auto ore collection simulation
+--   Teleport to nearest ore
+--   Speed / jump / fly / noclip
+--   Debug logs
+--   Full reset
+--
+-- This script is intended for a test place you control.
 
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 local CollectionService = game:GetService("CollectionService")
 
-local REMOTE_NAME = "EggDebugRemote"
+local player = Players.LocalPlayer
+local player_gui = player:WaitForChild("PlayerGui")
 
-local ADMINS = {
-	[123456789] = true, -- replace with your UserId
+----------------------------------------------------------------
+-- CONFIG
+----------------------------------------------------------------
+
+local CONFIG = {
+	ore_folder_name = "DebugOres",
+
+	ore_types = {
+		"Coal",
+		"Iron",
+		"Gold",
+		"Ruby",
+		"Diamond",
+		"Emerald",
+		"Obsidian",
+	},
+
+	paid_items = {
+		{
+			name = "Premium Helmet",
+			id = 10001,
+			type = "Helmet",
+			price = 99,
+		},
+
+		{
+			name = "Golden Helmet",
+			id = 10002,
+			type = "Helmet",
+			price = 249,
+		},
+
+		{
+			name = "Premium Armor",
+			id = 10003,
+			type = "Armor",
+			price = 399,
+		},
+
+		{
+			name = "Divine Armor",
+			id = 10004,
+			type = "Armor",
+			price = 799,
+		},
+	},
+
+	ore_spawn_count = 10,
+	ore_spawn_radius = 70,
+
+	speed_value = 80,
+	jump_value = 110,
+	fly_speed = 70,
 }
 
-local remote = ReplicatedStorage:FindFirstChild(REMOTE_NAME)
+----------------------------------------------------------------
+-- STATE
+----------------------------------------------------------------
 
-if not remote then
-	remote = Instance.new("RemoteEvent")
-	remote.Name = REMOTE_NAME
-	remote.Parent = ReplicatedStorage
-end
+local state = {
+	speed = false,
+	jump = false,
+	fly = false,
+	noclip = false,
 
-local function is_admin(player)
-	return ADMINS[player.UserId] == true
-end
+	ore_esp = false,
+	auto_collect = false,
 
-local function get_character(player)
+	menu = true,
+
+	test_inventory = {},
+}
+
+local original_walk_speed = 16
+local original_jump_power = 50
+
+local fly_connection
+local noclip_connection
+local auto_collect_connection
+
+local ore_highlights = {}
+
+----------------------------------------------------------------
+-- CHARACTER HELPERS
+----------------------------------------------------------------
+
+local function get_character()
 	return player.Character
 end
 
-local function get_root(player)
-	local character = get_character(player)
-	return character and character:FindFirstChild("HumanoidRootPart")
-end
-
-local function get_humanoid(player)
-	local character = get_character(player)
+local function get_humanoid()
+	local character = get_character()
 	return character and character:FindFirstChildOfClass("Humanoid")
 end
 
-local function get_position(object)
-	if object:IsA("BasePart") then
-		return object.Position
-	end
-
-	if object:IsA("Model") then
-		local primary = object.PrimaryPart
-		if primary then
-			return primary.Position
-		end
-
-		local part = object:FindFirstChildWhichIsA("BasePart", true)
-		if part then
-			return part.Position
-		end
-	end
-
-	return nil
+local function get_root()
+	local character = get_character()
+	return character and character:FindFirstChild("HumanoidRootPart")
 end
 
-local function get_target_part(object)
-	if object:IsA("BasePart") then
-		return object
-	end
+----------------------------------------------------------------
+-- DEBUG LOG
+----------------------------------------------------------------
 
-	if object:IsA("Model") then
-		return object.PrimaryPart
-			or object:FindFirstChild("HumanoidRootPart")
-			or object:FindFirstChildWhichIsA("BasePart", true)
-	end
-
-	return nil
+local function log(...)
+	print("[LOOT-FORGE-TEST]", ...)
 end
 
-local function nearest_egg(player)
-	local root = get_root(player)
+----------------------------------------------------------------
+-- ORE FOLDER
+----------------------------------------------------------------
+
+local function get_ore_folder()
+	local folder = workspace:FindFirstChild(CONFIG.ore_folder_name)
+
+	if not folder then
+		folder = Instance.new("Folder")
+		folder.Name = CONFIG.ore_folder_name
+		folder.Parent = workspace
+	end
+
+	return folder
+end
+
+----------------------------------------------------------------
+-- ORE CREATION
+----------------------------------------------------------------
+
+local function random_ore_position()
+	local root = get_root()
+
+	if not root then
+		return Vector3.new(0, 5, 0)
+	end
+
+	local angle = math.random() * math.pi * 2
+	local radius = math.random(15, CONFIG.ore_spawn_radius)
+
+	local x = math.cos(angle) * radius
+	local z = math.sin(angle) * radius
+
+	return root.Position + Vector3.new(x, 3, z)
+end
+
+local function create_ore(ore_type, position)
+	local part = Instance.new("Part")
+
+	part.Name = ore_type
+	part.Size = Vector3.new(4, 4, 4)
+	part.Anchored = true
+	part.CanCollide = true
+	part.Position = position
+
+	part.Material = Enum.Material.Slate
+
+	local color_map = {
+		Coal = Color3.fromRGB(35, 35, 35),
+		Iron = Color3.fromRGB(145, 145, 145),
+		Gold = Color3.fromRGB(255, 205, 50),
+		Ruby = Color3.fromRGB(210, 30, 60),
+		Diamond = Color3.fromRGB(80, 220, 255),
+		Emerald = Color3.fromRGB(50, 220, 100),
+		Obsidian = Color3.fromRGB(55, 20, 90),
+	}
+
+	part.Color = color_map[ore_type] or Color3.fromRGB(180, 180, 180)
+
+	local tag = Instance.new("StringValue")
+	tag.Name = "OreType"
+	tag.Value = ore_type
+	tag.Parent = part
+
+	CollectionService:AddTag(part, "DebugOre")
+
+	part.Parent = get_ore_folder()
+
+	return part
+end
+
+local function spawn_ores(amount)
+	amount = amount or CONFIG.ore_spawn_count
+
+	local folder = get_ore_folder()
+
+	for i = 1, amount do
+		local ore_type = CONFIG.ore_types[
+			math.random(1, #CONFIG.ore_types)
+		]
+
+		create_ore(ore_type, random_ore_position())
+	end
+
+	log("Spawned", amount, "debug ores")
+end
+
+local function clear_ores()
+	local folder = workspace:FindFirstChild(CONFIG.ore_folder_name)
+
+	if folder then
+		folder:ClearAllChildren()
+	end
+
+	log("Cleared debug ores")
+end
+
+----------------------------------------------------------------
+-- ORE ESP
+----------------------------------------------------------------
+
+local function clear_ore_esp()
+	for ore, highlight in pairs(ore_highlights) do
+		if highlight then
+			highlight:Destroy()
+		end
+
+		ore_highlights[ore] = nil
+	end
+end
+
+local function refresh_ore_esp()
+	clear_ore_esp()
+
+	if not state.ore_esp then
+		return
+	end
+
+	for _, ore in ipairs(CollectionService:GetTagged("DebugOre")) do
+		if ore:IsA("BasePart") then
+			local highlight = Instance.new("Highlight")
+
+			highlight.Name = "DebugOreESP"
+			highlight.Adornee = ore
+			highlight.FillTransparency = 0.45
+			highlight.OutlineTransparency = 0
+
+			highlight.Parent = ore
+
+			ore_highlights[ore] = highlight
+		end
+	end
+end
+
+----------------------------------------------------------------
+-- NEAREST ORE
+----------------------------------------------------------------
+
+local function get_nearest_ore()
+	local root = get_root()
 
 	if not root then
 		return nil
 	end
 
-	local best
-	local best_distance = math.huge
+	local closest
+	local closest_distance = math.huge
 
-	for _, egg in ipairs(CollectionService:GetTagged("Egg")) do
-		local position = get_position(egg)
+	for _, ore in ipairs(CollectionService:GetTagged("DebugOre")) do
+		if ore:IsA("BasePart") and ore.Parent then
+			local distance = (ore.Position - root.Position).Magnitude
 
-		if position then
-			local distance = (position - root.Position).Magnitude
-
-			if distance < best_distance then
-				best = egg
-				best_distance = distance
+			if distance < closest_distance then
+				closest = ore
+				closest_distance = distance
 			end
 		end
 	end
 
-	return best
+	return closest
 end
 
-local function teleport_to_object(player, object, offset)
-	local root = get_root(player)
-	local target = object and get_target_part(object)
+----------------------------------------------------------------
+-- TELEPORT
+----------------------------------------------------------------
 
-	if not root or not target then
-		return false
+local function teleport_to_ore()
+	local root = get_root()
+	local ore = get_nearest_ore()
+
+	if not root or not ore then
+		log("No ore found")
+		return
 	end
 
-	root.CFrame = target.CFrame + (offset or Vector3.new(0, 4, 0))
-	return true
+	root.CFrame = ore.CFrame + Vector3.new(0, 5, 0)
+
+	log("Teleported to", ore.Name)
 end
 
-local function set_movement(player, properties)
-	local humanoid = get_humanoid(player)
+----------------------------------------------------------------
+-- AUTO COLLECT
+----------------------------------------------------------------
+
+local function collect_ore(ore)
+	if not ore or not ore.Parent then
+		return
+	end
+
+	local ore_type = ore:FindFirstChild("OreType")
+
+	if not ore_type then
+		return
+	end
+
+	log("Collected debug ore:", ore_type.Value)
+
+	ore:Destroy()
+end
+
+local function set_auto_collect(enabled)
+	state.auto_collect = enabled
+
+	if auto_collect_connection then
+		auto_collect_connection:Disconnect()
+		auto_collect_connection = nil
+	end
+
+	if not enabled then
+		return
+	end
+
+	auto_collect_connection = RunService.Heartbeat:Connect(function()
+		local root = get_root()
+
+		if not root then
+			return
+		end
+
+		local ore = get_nearest_ore()
+
+		if not ore then
+			return
+		end
+
+		local distance = (ore.Position - root.Position).Magnitude
+
+		if distance < 10 then
+			collect_ore(ore)
+		end
+	end)
+end
+
+----------------------------------------------------------------
+-- MOVEMENT
+----------------------------------------------------------------
+
+local function set_speed(enabled)
+	state.speed = enabled
+
+	local humanoid = get_humanoid()
 
 	if not humanoid then
 		return
 	end
 
-	if properties.walk_speed then
-		humanoid.WalkSpeed = properties.walk_speed
-	end
-
-	if properties.jump_power then
-		humanoid.UseJumpPower = true
-		humanoid.JumpPower = properties.jump_power
+	if enabled then
+		original_walk_speed = humanoid.WalkSpeed
+		humanoid.WalkSpeed = CONFIG.speed_value
+	else
+		humanoid.WalkSpeed = original_walk_speed
 	end
 end
 
-local function handle_command(player, action, data)
-	if not is_admin(player) then
-		warn(("DEBUG DENIED: %s -> %s"):format(player.Name, tostring(action)))
+local function set_jump(enabled)
+	state.jump = enabled
+
+	local humanoid = get_humanoid()
+
+	if not humanoid then
 		return
 	end
 
-	if action == "movement" then
-		set_movement(player, data)
+	humanoid.UseJumpPower = true
 
-	elseif action == "teleport_egg" then
-		local egg = nearest_egg(player)
-
-		if egg then
-			teleport_to_object(player, egg)
-		end
-
-	elseif action == "teleport_object" and typeof(data) == "Instance" then
-		if data:IsDescendantOf(workspace) then
-			teleport_to_object(player, data)
-		end
-
-	elseif action == "teleport_player" then
-		local target_player = Players:FindFirstChild(data)
-
-		if target_player and target_player.Character then
-			local target_root = get_root(target_player)
-			local root = get_root(player)
-
-			if target_root and root then
-				root.CFrame = target_root.CFrame + Vector3.new(0, 4, 0)
-			end
-		end
-
-	elseif action == "debug_log" then
-		print(("[EGG DEBUG] %s: %s"):format(
-			player.Name,
-			tostring(data)
-		))
-
-	elseif action == "test_egg" then
-		local egg = data
-
-		if typeof(egg) == "Instance"
-			and egg:IsDescendantOf(workspace)
-			and CollectionService:HasTag(egg, "Egg") then
-
-			print(("[EGG DEBUG] Egg interaction test: %s -> %s")
-				:format(player.Name, egg:GetFullName()))
-		end
+	if enabled then
+		original_jump_power = humanoid.JumpPower
+		humanoid.JumpPower = CONFIG.jump_value
+	else
+		humanoid.JumpPower = original_jump_power
 	end
 end
 
-remote.OnServerEvent:Connect(handle_command)
+local function set_noclip(enabled)
+	state.noclip = enabled
 
-Players.PlayerAdded:Connect(function(player)
-	if is_admin(player) then
-		print("[EGG DEBUG] Admin connected:", player.Name)
+	if noclip_connection then
+		noclip_connection:Disconnect()
+		noclip_connection = nil
+	end
+
+	if not enabled then
+		return
+	end
+
+	noclip_connection = RunService.Stepped:Connect(function()
+		local character = get_character()
+
+		if not character then
+			return
+		end
+
+		for _, object in ipairs(character:GetDescendants()) do
+			if object:IsA("BasePart") then
+				object.CanCollide = false
+			end
+		end
+	end)
+end
+
+local function set_fly(enabled)
+	state.fly = enabled
+
+	if fly_connection then
+		fly_connection:Disconnect()
+		fly_connection = nil
+	end
+
+	if not enabled then
+		local root = get_root()
+
+		if root then
+			root.AssemblyLinearVelocity = Vector3.zero
+		end
+
+		return
+	end
+
+	fly_connection = RunService.RenderStepped:Connect(function()
+		local root = get_root()
+
+		if not root then
+			return
+		end
+
+		local camera = workspace.CurrentCamera
+
+		if not camera then
+			return
+		end
+
+		local direction = Vector3.zero
+
+		if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+			direction += camera.CFrame.LookVector
+		end
+
+		if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+			direction -= camera.CFrame.LookVector
+		end
+
+		if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+			direction -= camera.CFrame.RightVector
+		end
+
+		if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+			direction += camera.CFrame.RightVector
+		end
+
+		if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+			direction += Vector3.yAxis
+		end
+
+		if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+			direction -= Vector3.yAxis
+		end
+
+		if direction.Magnitude > 0 then
+			direction = direction.Unit
+		end
+
+		root.AssemblyLinearVelocity =
+			direction * CONFIG.fly_speed
+	end)
+end
+
+----------------------------------------------------------------
+-- PAID ITEM TEST SYSTEM
+----------------------------------------------------------------
+
+local function audit_paid_item(item)
+	log(
+		"PAID ITEM AUDIT:",
+		item.name,
+		"ID=" .. tostring(item.id),
+		"PRICE=" .. tostring(item.price),
+		"TYPE=" .. item.type
+	)
+
+	-- This is a simulated entitlement test.
+	-- A real game should verify ownership server-side.
+end
+
+local function test_unlock_paid_item(item)
+	state.test_inventory[item.id] = true
+
+	log(
+		"TEST UNLOCK:",
+		item.name,
+		"(Studio simulation only)"
+	)
+end
+
+local function remove_test_item(item)
+	state.test_inventory[item.id] = nil
+
+	log(
+		"TEST REMOVE:",
+		item.name
+	)
+end
+
+local function clear_test_inventory()
+	table.clear(state.test_inventory)
+
+	log("Cleared simulated paid inventory")
+end
+
+----------------------------------------------------------------
+-- GUI
+----------------------------------------------------------------
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "LootForgeTestHarness"
+gui.ResetOnSpawn = false
+gui.Parent = player_gui
+
+local main = Instance.new("Frame")
+main.Name = "Main"
+main.Size = UDim2.fromOffset(360, 620)
+main.Position = UDim2.fromOffset(20, 90)
+main.BackgroundTransparency = 0.08
+main.Parent = gui
+
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
+
+local title = Instance.new("TextLabel")
+title.Name = "Title"
+title.Size = UDim2.new(1, -20, 0, 42)
+title.Position = UDim2.fromOffset(10, 8)
+title.BackgroundTransparency = 1
+title.Text = "LOOT TO FORGE TEST HARNESS"
+title.TextScaled = true
+title.Parent = main
+
+local list = Instance.new("ScrollingFrame")
+list.Name = "List"
+list.Position = UDim2.fromOffset(10, 55)
+list.Size = UDim2.new(1, -20, 1, -65)
+list.BackgroundTransparency = 1
+list.BorderSizePixel = 0
+list.ScrollBarThickness = 6
+list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+list.CanvasSize = UDim2.new()
+list.Parent = main
+
+local layout = Instance.new("UIListLayout")
+layout.Padding = UDim.new(0, 6)
+layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+layout.Parent = list
+
+local function make_button(text, callback)
+	local button = Instance.new("TextButton")
+
+	button.Size = UDim2.new(1, -10, 0, 36)
+	button.Text = text
+	button.TextScaled = true
+	button.Parent = list
+
+	Instance.new("UICorner", button).CornerRadius = UDim.new(0, 8)
+
+	button.Activated:Connect(function()
+		callback(button)
+	end)
+
+	return button
+end
+
+local function make_label(text)
+	local label = Instance.new("TextLabel")
+
+	label.Size = UDim2.new(1, -10, 0, 30)
+	label.Text = text
+	label.TextScaled = true
+	label.BackgroundTransparency = 1
+	label.Parent = list
+
+	return label
+end
+
+----------------------------------------------------------------
+-- MOVEMENT UI
+----------------------------------------------------------------
+
+make_label("MOVEMENT")
+
+make_button("Speed: OFF", function(button)
+	set_speed(not state.speed)
+	button.Text = state.speed and "Speed: ON" or "Speed: OFF"
+end)
+
+make_button("Jump: OFF", function(button)
+	set_jump(not state.jump)
+	button.Text = state.jump and "Jump: ON" or "Jump: OFF"
+end)
+
+make_button("Fly: OFF", function(button)
+	set_fly(not state.fly)
+	button.Text = state.fly and "Fly: ON" or "Fly: OFF"
+end)
+
+make_button("Noclip: OFF", function(button)
+	set_noclip(not state.noclip)
+	button.Text = state.noclip and "Noclip: ON" or "Noclip: OFF"
+end)
+
+----------------------------------------------------------------
+-- ORE UI
+----------------------------------------------------------------
+
+make_label("ORE TESTING")
+
+make_button("Spawn 10 Ores", function()
+	spawn_ores(10)
+	refresh_ore_esp()
+end)
+
+make_button("Spawn 50 Ores", function()
+	spawn_ores(50)
+	refresh_ore_esp()
+end)
+
+make_button("Spawn 100 Ores", function()
+	spawn_ores(100)
+	refresh_ore_esp()
+end)
+
+make_button("Teleport → Nearest Ore", function()
+	teleport_to_ore()
+end)
+
+make_button("Auto Collect: OFF", function(button)
+	set_auto_collect(not state.auto_collect)
+	button.Text = state.auto_collect
+		and "Auto Collect: ON"
+		or "Auto Collect: OFF"
+end)
+
+make_button("Ore ESP: OFF", function(button)
+	state.ore_esp = not state.ore_esp
+
+	refresh_ore_esp()
+
+	button.Text = state.ore_esp
+		and "Ore ESP: ON"
+		or "Ore ESP: OFF"
+end)
+
+make_button("Clear All Test Ores", function()
+	clear_ores()
+	clear_ore_esp()
+end)
+
+----------------------------------------------------------------
+-- PAID ITEMS
+----------------------------------------------------------------
+
+make_label("PAID ARMOR / HELMET AUDIT")
+
+for _, item in ipairs(CONFIG.paid_items) do
+	local current_item = item
+
+	make_button(
+		"Audit → " .. current_item.name ..
+		" | R$" .. tostring(current_item.price),
+
+		function()
+			audit_paid_item(current_item)
+		end
+	)
+
+	make_button(
+		"TEST UNLOCK → " .. current_item.name,
+
+		function(button)
+			test_unlock_paid_item(current_item)
+
+			button.Text =
+				"TESTED → " .. current_item.name
+		end
+	)
+
+	make_button(
+		"REMOVE TEST → " .. current_item.name,
+
+		function()
+			remove_test_item(current_item)
+		end
+	)
+end
+
+make_button("Clear All Test Paid Items", function()
+	clear_test_inventory()
+end)
+
+----------------------------------------------------------------
+-- DEBUG
+----------------------------------------------------------------
+
+make_label("DEBUG")
+
+make_button("Print Test Inventory", function()
+	log("========== TEST INVENTORY ==========")
+
+	for _, item in ipairs(CONFIG.paid_items) do
+		if state.test_inventory[item.id] then
+			print("[OWNED-TEST]", item.name)
+		end
+	end
+
+	log("====================================")
+end)
+
+make_button("Reset Everything", function()
+	set_speed(false)
+	set_jump(false)
+	set_fly(false)
+	set_noclip(false)
+	set_auto_collect(false)
+
+	clear_ores()
+	clear_ore_esp()
+	clear_test_inventory()
+
+	log("Full harness reset")
+end)
+
+----------------------------------------------------------------
+-- HOTKEYS
+----------------------------------------------------------------
+
+local toggle_button = Instance.new("TextButton")
+toggle_button.Size = UDim2.fromOffset(100, 36)
+toggle_button.Position = UDim2.fromOffset(20, 48)
+toggle_button.Text = "MENU"
+toggle_button.TextScaled = true
+toggle_button.Parent = gui
+
+Instance.new("UICorner", toggle_button).CornerRadius = UDim.new(0, 8)
+
+toggle_button.Activated:Connect(function()
+	state.menu = not state.menu
+	main.Visible = state.menu
+end)
+
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed then
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.RightShift then
+		state.menu = not state.menu
+		main.Visible = state.menu
+	end
+
+	if input.KeyCode == Enum.KeyCode.F1 then
+		set_speed(not state.speed)
+	end
+
+	if input.KeyCode == Enum.KeyCode.F2 then
+		set_noclip(not state.noclip)
+	end
+
+	if input.KeyCode == Enum.KeyCode.F3 then
+		set_fly(not state.fly)
+	end
+
+	if input.KeyCode == Enum.KeyCode.F4 then
+		teleport_to_ore()
+	end
+
+	if input.KeyCode == Enum.KeyCode.F5 then
+		spawn_ores(10)
+		refresh_ore_esp()
 	end
 end)
+
+----------------------------------------------------------------
+-- CHARACTER RESPAWN
+----------------------------------------------------------------
+
+player.CharacterAdded:Connect(function()
+	task.wait(0.5)
+
+	if state.speed then
+		set_speed(true)
+	end
+
+	if state.jump then
+		set_jump(true)
+	end
+
+	if state.fly then
+		set_fly(false)
+		task.wait()
+		set_fly(true)
+	end
+end)
+
+----------------------------------------------------------------
+-- ORE EVENTS
+----------------------------------------------------------------
+
+CollectionService:GetInstanceAddedSignal("DebugOre"):Connect(function()
+	if state.ore_esp then
+		refresh_ore_esp()
+	end
+end)
+
+CollectionService:GetInstanceRemovedSignal("DebugOre"):Connect(function()
+	if state.ore_esp then
+		refresh_ore_esp()
+	end
+end)
+
+log("Test harness loaded")
