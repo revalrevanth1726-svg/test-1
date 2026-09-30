@@ -1,25 +1,26 @@
 -- language: Luau, file: ServerScriptService/OwnerPaidItems.server.lua
 -- target: Roblox Studio
--- Owner-only developer tool for testing paid items.
+-- Owner-only paid-item test/grant system.
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 
 ----------------------------------------------------------------
 -- CONFIG
 ----------------------------------------------------------------
 
-local ADMIN_USER_IDS = {
+local OWNER_USER_IDS = {
 	123456789, -- replace with your Roblox UserId
 }
 
-local PAID_ITEMS = {
-	Genesis = {
+local ITEM_DEFINITIONS = {
+	AstralGenesis = {
 		display_name = "Astral Genesis: The Tri-Wyrm Set",
 		template_name = "AstralGenesis",
 	},
 
-	Void = {
+	VoidDominator = {
 		display_name = "Void Dominator",
 		template_name = "VoidDominator",
 	},
@@ -29,96 +30,119 @@ local PAID_ITEMS = {
 -- SETUP
 ----------------------------------------------------------------
 
-local item_folder = ServerStorage:FindFirstChild("PaidItems")
+local paid_items = ServerStorage:FindFirstChild("PaidItems")
 
-if not item_folder then
-	item_folder = Instance.new("Folder")
-	item_folder.Name = "PaidItems"
-	item_folder.Parent = ServerStorage
+if not paid_items then
+	paid_items = Instance.new("Folder")
+	paid_items.Name = "PaidItems"
+	paid_items.Parent = ServerStorage
 end
 
-local function is_admin(player)
-	return table.find(ADMIN_USER_IDS, player.UserId) ~= nil
+local remote = ReplicatedStorage:FindFirstChild("OwnerPaidItemRemote")
+
+if not remote then
+	remote = Instance.new("RemoteEvent")
+	remote.Name = "OwnerPaidItemRemote"
+	remote.Parent = ReplicatedStorage
 end
 
-local function find_template(item_key)
-	local data = PAID_ITEMS[item_key]
+----------------------------------------------------------------
+-- SECURITY
+----------------------------------------------------------------
 
-	if not data then
-		return nil, "Unknown item"
+local function is_owner(player)
+	return table.find(OWNER_USER_IDS, player.UserId) ~= nil
+end
+
+----------------------------------------------------------------
+-- HELPERS
+----------------------------------------------------------------
+
+local function get_character(player)
+	return player.Character
+end
+
+local function get_humanoid(player)
+	local character = get_character(player)
+
+	if not character then
+		return nil
 	end
 
-	local template = item_folder:FindFirstChild(data.template_name)
+	return character:FindFirstChildOfClass("Humanoid")
+end
 
-	if not template then
-		return nil, ("Missing template: %s"):format(data.template_name)
+local function get_backpack(player)
+	return player:FindFirstChildOfClass("Backpack")
+end
+
+local function destroy_named(container, name)
+	if not container then
+		return
 	end
 
-	return template, nil
+	for _, object in ipairs(container:GetChildren()) do
+		if object.Name == name then
+			object:Destroy()
+		end
+	end
 end
 
 local function remove_existing(player, template_name)
-	local containers = {
-		player:FindFirstChildOfClass("Backpack"),
-		player.Character,
-	}
+	destroy_named(get_character(player), template_name)
+	destroy_named(get_backpack(player), template_name)
 
-	for _, container in ipairs(containers) do
-		if not container then
-			continue
+	local character = get_character(player)
+
+	if character then
+		for _, object in ipairs(character:GetChildren()) do
+			if object:GetAttribute("OwnerPaidItemTemplate") == template_name then
+				object:Destroy()
+			end
 		end
+	end
 
-		for _, object in ipairs(container:GetChildren()) do
-			if object.Name == template_name then
+	local backpack = get_backpack(player)
+
+	if backpack then
+		for _, object in ipairs(backpack:GetChildren()) do
+			if object:GetAttribute("OwnerPaidItemTemplate") == template_name then
 				object:Destroy()
 			end
 		end
 	end
 end
 
-local function give_item(player, item_key)
-	if not is_admin(player) then
-		warn("[OWNER GRANT] Unauthorized:", player.Name)
+local function mark_owned(object, template_name)
+	object:SetAttribute("OwnerPaidItem", true)
+	object:SetAttribute("OwnerPaidItemTemplate", template_name)
+end
+
+----------------------------------------------------------------
+-- OBJECT GRANTING
+----------------------------------------------------------------
+
+local function grant_single_object(player, object, template_name)
+	local character = get_character(player)
+	local humanoid = get_humanoid(player)
+	local backpack = get_backpack(player)
+
+	if not character then
 		return
 	end
-
-	local data = PAID_ITEMS[item_key]
-
-	if not data then
-		warn("[OWNER GRANT] Unknown item:", item_key)
-		return
-	end
-
-	local template, error_message = find_template(item_key)
-
-	if not template then
-		warn("[OWNER GRANT]", error_message)
-		return
-	end
-
-	remove_existing(player, data.template_name)
-
-	local clone = template:Clone()
 
 	------------------------------------------------------------
 	-- TOOL
 	------------------------------------------------------------
 
-	if clone:IsA("Tool") then
-		local backpack = player:FindFirstChildOfClass("Backpack")
-
+	if object:IsA("Tool") then
 		if not backpack then
-			clone:Destroy()
+			object:Destroy()
 			return
 		end
 
-		clone.Parent = backpack
-
-		print(
-			("[OWNER GRANT] %s received %s")
-				:format(player.Name, data.display_name)
-		)
-
+		mark_owned(object, template_name)
+		object.Parent = backpack
 		return
 	end
 
@@ -126,158 +150,239 @@ local function give_item(player, item_key)
 	-- ACCESSORY
 	------------------------------------------------------------
 
-	if clone:IsA("Accessory") then
-		local character = player.Character
-
-		if not character then
-			clone:Destroy()
-			return
-		end
-
-		local humanoid = character:FindFirstChildOfClass("Humanoid")
-
+	if object:IsA("Accessory") then
 		if not humanoid then
-			clone:Destroy()
+			object:Destroy()
 			return
 		end
 
-		humanoid:AddAccessory(clone)
-
-		print(
-			("[OWNER GRANT] Equipped %s on %s")
-				:format(data.display_name, player.Name)
-		)
-
+		mark_owned(object, template_name)
+		humanoid:AddAccessory(object)
 		return
 	end
 
 	------------------------------------------------------------
-	-- MODEL / ARMOR SET
+	-- MODEL / PART / OTHER
 	------------------------------------------------------------
 
-	local character = player.Character
+	mark_owned(object, template_name)
+	object.Parent = character
 
-	if not character then
-		clone:Destroy()
-		return
-	end
+	if object:IsA("Model") then
+		local root = character:FindFirstChild("HumanoidRootPart")
 
-	clone.Parent = character
+		if root then
+			local primary = object.PrimaryPart
 
-	local root = character:FindFirstChild("HumanoidRootPart")
-
-	if clone:IsA("Model") and root then
-		clone:PivotTo(root.CFrame)
-	end
-
-	print(
-		("[OWNER GRANT] Spawned %s for %s")
-			:format(data.display_name, player.Name)
-	)
-end
-
-local function remove_item(player, item_key)
-	if not is_admin(player) then
-		return
-	end
-
-	local data = PAID_ITEMS[item_key]
-
-	if not data then
-		return
-	end
-
-	local containers = {
-		player:FindFirstChildOfClass("Backpack"),
-		player.Character,
-	}
-
-	for _, container in ipairs(containers) do
-		if not container then
-			continue
-		end
-
-		for _, object in ipairs(container:GetChildren()) do
-			if object.Name == data.template_name then
-				object:Destroy()
+			if primary then
+				object:PivotTo(root.CFrame)
 			end
 		end
 	end
+end
+
+local function grant_template(player, template)
+	local template_name = template.Name
+
+	------------------------------------------------------------
+	-- DIRECT TOOL
+	------------------------------------------------------------
+
+	if template:IsA("Tool") then
+		local clone = template:Clone()
+		grant_single_object(player, clone, template_name)
+		return
+	end
+
+	------------------------------------------------------------
+	-- DIRECT ACCESSORY
+	------------------------------------------------------------
+
+	if template:IsA("Accessory") then
+		local clone = template:Clone()
+		grant_single_object(player, clone, template_name)
+		return
+	end
+
+	------------------------------------------------------------
+	-- MODEL / FOLDER SET
+	------------------------------------------------------------
+
+	local children = template:GetChildren()
+
+	if #children > 0 then
+		for _, child in ipairs(children) do
+			local clone = child:Clone()
+			grant_single_object(player, clone, template_name)
+		end
+
+		return
+	end
+
+	------------------------------------------------------------
+	-- SINGLE MODEL / PART
+	------------------------------------------------------------
+
+	local clone = template:Clone()
+	grant_single_object(player, clone, template_name)
+end
+
+----------------------------------------------------------------
+-- GRANT
+----------------------------------------------------------------
+
+local function grant_item(player, item_key)
+	if not is_owner(player) then
+		warn("[OWNER PAID ITEM] Unauthorized request:", player.Name)
+		return
+	end
+
+	local definition = ITEM_DEFINITIONS[item_key]
+
+	if not definition then
+		warn("[OWNER PAID ITEM] Unknown item key:", item_key)
+		return
+	end
+
+	local template = paid_items:FindFirstChild(definition.template_name)
+
+	if not template then
+		warn(
+			("[OWNER PAID ITEM] Missing template: %s")
+				:format(definition.template_name)
+		)
+		return
+	end
+
+	remove_existing(player, definition.template_name)
+	grant_template(player, template)
 
 	print(
-		("[OWNER GRANT] Removed %s from %s")
-			:format(data.display_name, player.Name)
+		("[OWNER PAID ITEM] Granted %s -> %s")
+			:format(definition.display_name, player.Name)
 	)
 end
+
+----------------------------------------------------------------
+-- REMOVE
+----------------------------------------------------------------
+
+local function remove_item(player, item_key)
+	if not is_owner(player) then
+		return
+	end
+
+	local definition = ITEM_DEFINITIONS[item_key]
+
+	if not definition then
+		return
+	end
+
+	local template_name = definition.template_name
+
+	remove_existing(player, template_name)
+
+	print(
+		("[OWNER PAID ITEM] Removed %s <- %s")
+			:format(definition.display_name, player.Name)
+	)
+end
+
+----------------------------------------------------------------
+-- REMOTE
+----------------------------------------------------------------
+
+remote.OnServerEvent:Connect(function(player, action, item_key)
+	if not is_owner(player) then
+		return
+	end
+
+	if typeof(action) ~= "string" then
+		return
+	end
+
+	if action == "grant" then
+		if typeof(item_key) ~= "string" then
+			return
+		end
+
+		grant_item(player, item_key)
+
+	elseif action == "remove" then
+		if typeof(item_key) ~= "string" then
+			return
+		end
+
+		remove_item(player, item_key)
+
+	elseif action == "grant_all" then
+		for key in pairs(ITEM_DEFINITIONS) do
+			grant_item(player, key)
+		end
+
+	elseif action == "remove_all" then
+		for key in pairs(ITEM_DEFINITIONS) do
+			remove_item(player, key)
+		end
+	end
+end)
 
 ----------------------------------------------------------------
 -- CHAT COMMANDS
 ----------------------------------------------------------------
 
-local function handle_command(player, message)
-	if not is_admin(player) then
+local function handle_chat(player, message)
+	if not is_owner(player) then
 		return
 	end
 
 	local args = string.split(message, " ")
 	local command = string.lower(args[1] or "")
-	local item = string.lower(args[2] or "")
+	local value = string.lower(args[2] or "")
 
 	if command == "!paid" then
+		if value == "genesis" then
+			grant_item(player, "AstralGenesis")
 
-		if item == "genesis" then
-			give_item(player, "Genesis")
+		elseif value == "void" then
+			grant_item(player, "VoidDominator")
 
-		elseif item == "void" then
-			give_item(player, "Void")
-
-		elseif item == "all" then
-			give_item(player, "Genesis")
-			give_item(player, "Void")
-
-		else
-			print("Paid commands:")
-			print("!paid genesis")
-			print("!paid void")
-			print("!paid all")
+		elseif value == "all" then
+			for key in pairs(ITEM_DEFINITIONS) do
+				grant_item(player, key)
+			end
 		end
 
 	elseif command == "!unpaid" then
+		if value == "genesis" then
+			remove_item(player, "AstralGenesis")
 
-		if item == "genesis" then
-			remove_item(player, "Genesis")
+		elseif value == "void" then
+			remove_item(player, "VoidDominator")
 
-		elseif item == "void" then
-			remove_item(player, "Void")
-
-		elseif item == "all" then
-			remove_item(player, "Genesis")
-			remove_item(player, "Void")
+		elseif value == "all" then
+			for key in pairs(ITEM_DEFINITIONS) do
+				remove_item(player, key)
+			end
 		end
 	end
 end
 
-----------------------------------------------------------------
--- PLAYER HOOK
-----------------------------------------------------------------
-
 local function setup_player(player)
 	player.Chatted:Connect(function(message)
-		handle_command(player, message)
+		handle_chat(player, message)
 	end)
 
-	if is_admin(player) then
-		print("")
-		print("========== OWNER TEST MODE ==========")
-		print("Player:", player.Name)
+	if is_owner(player) then
+		print("======================================")
+		print("OWNER PAID ITEM PANEL ENABLED")
 		print("!paid genesis")
 		print("!paid void")
 		print("!paid all")
 		print("!unpaid genesis")
 		print("!unpaid void")
 		print("!unpaid all")
-		print("=====================================")
-		print("")
+		print("======================================")
 	end
 end
 
